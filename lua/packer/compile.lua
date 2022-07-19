@@ -9,6 +9,8 @@ local function cfg(_config)
   config = _config.profile
 end
 
+local augroup_name = 'packer_load_aucmds'
+
 local feature_guard = [[
 if !has('nvim-0.5')
   echohl WarningMsg
@@ -380,19 +382,20 @@ local function make_loaders(_, plugins, output_lua, should_profile)
         loaders[name].only_setup = false
         loaders[name].only_cond = false
         if type(plugin.event) == 'string' then
-          if not plugin.event:find '%s' then
-            plugin.event = { plugin.event .. ' *' }
-          else
-            plugin.event = { plugin.event }
-          end
+          plugin.event = { plugin.event }
         end
 
         for _, event in ipairs(plugin.event) do
-          if event:sub(#event, -1) ~= '*' and not event:find '%s' then
-            event = event .. ' *'
-          end
-          events[event] = events[event] or {}
-          table.insert(events[event], quote_name)
+          local name_and_pattern = vim.split(event, '%s+', { trimempty = true })
+          local event_name = table.remove(name_and_pattern, 1)
+          local event_pattern = name_and_pattern[1] or '*'
+          events[event] = events[event]
+            or {
+              plugin_names = {},
+              name = event_name,
+              pattern = event_pattern,
+            }
+          table.insert(events[event].plugin_names, quote_name)
         end
       end
 
@@ -505,7 +508,8 @@ local function make_loaders(_, plugins, output_lua, should_profile)
     table.insert(
       ft_aucmds,
       fmt(
-        'vim.cmd [[au FileType %s ++once lua require("packer.load")({%s}, { ft = "%s" }, _G.packer_plugins)]]',
+        'vim.api.nvim_create_autocmd("FileType", { group = "%s", pattern = "%s", once = true, command = [[lua require("packer.load")({%s}, { ft = "%s" }, _G.packer_plugins)]] })',
+        augroup_name,
         ft,
         table.concat(names, ', '),
         ft
@@ -514,13 +518,15 @@ local function make_loaders(_, plugins, output_lua, should_profile)
   end
 
   local event_aucmds = {}
-  for event, names in pairs(events) do
+  for event, detail in pairs(events) do
     table.insert(
       event_aucmds,
       fmt(
-        'vim.cmd [[au %s ++once lua require("packer.load")({%s}, { event = "%s" }, _G.packer_plugins)]]',
-        event,
-        table.concat(names, ', '),
+        'vim.api.nvim_create_autocmd("%s", { group = "%s", pattern = "%s", once = true, command = [[lua require("packer.load")({%s}, { event = "%s" }, _G.packer_plugins)]] })',
+        detail.name,
+        augroup_name,
+        detail.pattern,
+        table.concat(detail.plugin_names, ', '),
         event:gsub([[\]], [[\\]])
       )
     )
@@ -571,14 +577,14 @@ local function make_loaders(_, plugins, output_lua, should_profile)
     local command_line
     if string.match(command, '^%w+$') then
       command_line = fmt(
-        'pcall(vim.cmd, [[command -nargs=* -range -bang -complete=file %s lua require("packer.load")({%s}, { cmd = "%s", l1 = <line1>, l2 = <line2>, bang = <q-bang>, args = <q-args>, mods = "<mods>" }, _G.packer_plugins)]])',
+        'pcall(vim.api.nvim_create_user_command, "%s", [[lua require("packer.load")({%s}, { cmd = "%s", l1 = <line1>, l2 = <line2>, bang = <q-bang>, args = <q-args>, mods = "<mods>" }, _G.packer_plugins)]], { nargs = "*", range = true, bang = true, complete = "file" })',
         command,
         table.concat(names, ', '),
         command
       )
     else
       command_line = fmt(
-        'pcall(vim.cmd, [[au CmdUndefined %s ++once lua require"packer.load"({%s}, {}, _G.packer_plugins)]])',
+        'pcall(vim.api.nvim_create_autocmd, "CmdUndefined", { pattern = "%s", once = true, command = [[lua require"packer.load"({%s}, {}, _G.packer_plugins)]] })',
         command,
         table.concat(names, ', ')
       )
@@ -595,7 +601,7 @@ local function make_loaders(_, plugins, output_lua, should_profile)
     local escaped_map_lt = string.gsub(keymap[2], '<', '<lt>')
     local escaped_map = string.gsub(escaped_map_lt, '([\\"])', '\\%1')
     local keymap_line = fmt(
-      'vim.cmd [[%snoremap <silent> %s <cmd>lua require("packer.load")({%s}, { keys = "%s"%s }, _G.packer_plugins)<cr>]]',
+      'vim.keymap.set("%s", [[%s]], [[<Cmd>lua require("packer.load")({%s}, { keys = "%s"%s }, _G.packer_plugins)<CR>]], { silent = true })',
       keymap[1],
       keymap[2],
       table.concat(names, ', '),
@@ -764,7 +770,7 @@ local function make_loaders(_, plugins, output_lua, should_profile)
   local some_event = next(event_aucmds) ~= nil
   local some_fn = next(fn_aucmds) ~= nil
   if some_ft or some_event or some_fn then
-    table.insert(result, 'vim.cmd [[augroup packer_load_aucmds]]\nvim.cmd [[au!]]')
+    table.insert(result, fmt('vim.api.nvim_create_augroup("%s", { clear = true })', augroup_name))
   end
 
   if some_ft then
@@ -782,9 +788,6 @@ local function make_loaders(_, plugins, output_lua, should_profile)
     timed_chunk(fn_aucmds, 'Defining lazy-load function autocommands', result)
   end
 
-  if some_ft or some_event or some_fn then
-    table.insert(result, 'vim.cmd("augroup END")')
-  end
   if next(ftdetect_paths) then
     table.insert(result, 'vim.cmd [[augroup filetypedetect]]')
     for _, path in ipairs(ftdetect_paths) do
